@@ -1,0 +1,87 @@
+name: Sync Reflections
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build per-course reflection files
+        run: |
+          curl -L "https://docs.google.com/spreadsheets/d/1Ia7hF9vLGfdlMp-yItvCZMMYCMlPWRSJ_Lr_5dDIZD8/gviz/tq?tqx=out:csv&sheet=Course%20Ratings" -o ratings_data.csv
+          curl -L "https://docs.google.com/spreadsheets/d/1Ia7hF9vLGfdlMp-yItvCZMMYCMlPWRSJ_Lr_5dDIZD8/gviz/tq?tqx=out:csv&gid=1881100916" -o reflections_data.csv
+          python3 -c "
+          import csv, json, os, shutil
+          with open('ratings_data.csv', newline='', encoding='utf-8') as f:
+              ratings = list(csv.DictReader(f))
+          with open('reflections_data.csv', newline='', encoding='utf-8') as f:
+              reflections = list(csv.DictReader(f))
+          name_to_link = {}
+          for r in ratings:
+              name = (r.get('Course Name') or '').strip()
+              link = (r.get('Course Link') or '').strip()
+              if name and link:
+                  name_to_link[name] = link
+          approval_col = None
+          q_cols = []
+          if reflections:
+              for col in reflections[0].keys():
+                  if col and 'check for cnd' in col.lower():
+                      approval_col = col
+                  if col and col.strip().lower().startswith('reflection question'):
+                      q_cols.append(col)
+          result = {}
+          for row in reflections:
+              name = (row.get('Course Name') or '').strip()
+              if not name:
+                  continue
+              approved = False
+              if approval_col:
+                  val = str(row.get(approval_col,'')).strip().upper()
+                  approved = val in ('TRUE','YES','1','X','CHECKED')
+              if not approved:
+                  continue
+              link = name_to_link.get(name)
+              if not link:
+                  continue
+              slug = link.rstrip('/').split('/')[-1]
+              questions = []
+              for qc in q_cols:
+                  q = (row.get(qc) or '').strip()
+                  if q:
+                      questions.append(q)
+              if questions:
+                  result[slug] = questions
+          out_dir = 'reflsurgcnd'
+          if os.path.exists(out_dir):
+              shutil.rmtree(out_dir)
+          os.makedirs(out_dir)
+          for slug, qs in result.items():
+              with open(os.path.join(out_dir, slug + '.json'), 'w', encoding='utf-8') as f:
+                  json.dump(qs, f, ensure_ascii=False)
+          all_slugs = set()
+          for r in ratings:
+              link = (r.get('Course Link') or '').strip()
+              if link:
+                  all_slugs.add(link.rstrip('/').split('/')[-1])
+          for slug in all_slugs:
+              if slug not in result:
+                  with open(os.path.join(out_dir, slug + '.json'), 'w', encoding='utf-8') as f:
+                      f.write('[]')
+          "
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add -A
+          git diff --staged --quiet || git commit -m "Update data"
+          git push
